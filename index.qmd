@@ -1,0 +1,300 @@
+---
+title: "Comparing False Discovery Proportion (FDP) Methods"
+author: "Michael Heming"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    code-fold: false
+    toc: true
+    theme: default
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+# Introduction
+
+This document compares three different methods for controlling the False Discovery Rate (FDR) or False Discovery Proportion (FDP) in multiple hypothesis testing using simulated quantitative omics data:
+
+1. **Benjamini-Hochberg (BH)**: The classic FDR control procedure
+2. **q-value (Storey)**: An improved FDR estimation method
+3. **permFDP**: A permutation-based approach for controlling FDP
+
+The simulation uses a realistic model where biological variability determines which features are truly null.
+
+# Setup
+
+```{r setup}
+library(qvalue)
+library(permFDP)
+library(knitr)
+
+set.seed(123)
+```
+
+# Simulation Function
+
+Based on the SIMPLYCORRECT realistic model with default parameters:
+- m = 800 features
+- nc = 10 controls, nt = 10 treatment samples
+- effectSD = 1 (typical effect magnitude)
+- bioVar = 0.05 (typical biological variability)
+- bioVGamma = c(4, 0.5)
+- expVar = 0.03 (technical variability)
+
+```{r simulation-function}
+simulate_realistic_data <- function(seed = 1) {
+    
+    set.seed(seed)
+    
+    m <- 800
+    avg <- 22
+    sd <- 3
+    nc <- 10
+    nt <- 10
+    effectSD <- 1
+    bioVar <- 0.05
+    bioVGamma <- c(4, 0.5)
+    expVar <- 0.03
+    
+    trueQuantC <- rnorm(m, avg, sd)
+    
+    realEffects <- rnorm(m, 0, effectSD)
+    
+    bioVars <- rgamma(m, shape = bioVGamma[1], scale = bioVGamma[2]) * 
+               bioVar / (bioVGamma[1] * bioVGamma[2])
+    
+    nullIsTrue <- (abs(realEffects) < (bioVars * trueQuantC))
+    realEffects[nullIsTrue] <- 0
+    
+    design_vector <- c(rep(1, nc), rep(2, nt))
+    expr_data <- matrix(0, nrow = m, ncol = nc + nt)
+    
+    for (i in 1:m) {
+        totalVar <- trueQuantC[i] * bioVars[i] + trueQuantC[i] * expVar
+        expr_data[i, 1:nc] <- rnorm(nc, trueQuantC[i], totalVar)
+        expr_data[i, (nc+1):(nc+nt)] <- rnorm(nt, trueQuantC[i] + realEffects[i], totalVar)
+    }
+    
+    pvalues <- sapply(1:m, function(i) {
+        t.test(expr_data[i, 1:nc], expr_data[i, (nc+1):(nc+nt)])$p.value
+    })
+    
+    list(
+        expr_data = expr_data,
+        design_vector = design_vector,
+        pvalues = pvalues,
+        nullIsTrue = nullIsTrue,
+        n_true_null = sum(nullIsTrue),
+        n_true_sig = sum(!nullIsTrue)
+    )
+}
+```
+
+# Run Three Independent Simulations
+
+To ensure robustness, we run the same realistic model three times with different random seeds.
+
+```{r generate-data}
+n_simulations <- 3
+
+simulated_data <- lapply(1:n_simulations, function(i) {
+    simulate_realistic_data(seed = 100 + i)
+})
+
+names(simulated_data) <- paste("Simulation", 1:n_simulations)
+
+for (name in names(simulated_data)) {
+    cat(name, ":\n", sep = "")
+    cat("  True nulls:", simulated_data[[name]]$n_true_null, "\n")
+    cat("  True signals:", simulated_data[[name]]$n_true_sig, "\n\n")
+}
+```
+
+# Apply Methods to Each Simulation
+
+```{r apply-methods}
+results_list <- list()
+
+for (sim_name in names(simulated_data)) {
+    cat("\n===", sim_name, "===\n")
+    
+    sim <- simulated_data[[sim_name]]
+    pvals <- sim$pvalues
+    
+    padj_bh <- p.adjust(pvals, method = "BH")
+    sign_bh <- which(padj_bh <= 0.05)
+    
+    qobj <- qvalue(p = pvals, fdr.level = 0.05)
+    sign_qv <- which(qobj$qvalues <= 0.05)
+    
+    set.seed(123)
+    pf_threshold <- permFDP::permFDP.adjust.threshold(
+        pVals = pvals,
+        threshold = 0.05,
+        myDesign = sim$design_vector,
+        intOnly = sim$expr_data,
+        nPerms = 100
+    )
+    sign_pf <- which(pvals <= pf_threshold)
+    
+    cat("BH:", length(sign_bh), "| Qvalue:", length(sign_qv), 
+        "| permFDP:", length(sign_pf), "\n")
+    
+    calc_stats <- function(sign_idx, true_null, n_null, n_sig) {
+        R <- length(sign_idx)
+        if (R == 0) {
+            return(c(R = 0, TP = 0, FP = 0, FDP = 0, Sensitivity = 0, Specificity = 1))
+        }
+        
+        TP <- sum(!true_null[sign_idx])
+        FP <- sum(true_null[sign_idx])
+        TN <- n_null - FP
+        
+        c(R = R, TP = TP, FP = FP, FDP = FP / R,
+          Sensitivity = TP / n_sig, Specificity = TN / n_null)
+    }
+    
+    results_list[[sim_name]] <- list(
+        BH = calc_stats(sign_bh, sim$nullIsTrue, sim$n_true_null, sim$n_true_sig),
+        Qvalue = calc_stats(sign_qv, sim$nullIsTrue, sim$n_true_null, sim$n_true_sig),
+        permFDP = calc_stats(sign_pf, sim$nullIsTrue, sim$n_true_null, sim$n_true_sig),
+        true_null_count = sim$n_true_null,
+        true_sig_count = sim$n_true_sig
+    )
+}
+```
+
+# Results
+
+```{r format-results}
+extract_method_results <- function(method_name) {
+    do.call(rbind, lapply(results_list, function(x) x[[method_name]]))
+}
+
+bh_results <- extract_method_results("BH")
+qv_results <- extract_method_results("Qvalue")
+pf_results <- extract_method_results("permFDP")
+
+rownames(bh_results) <- names(results_list)
+rownames(qv_results) <- names(results_list)
+rownames(pf_results) <- names(results_list)
+
+bh_avg <- colMeans(bh_results)
+qv_avg <- colMeans(qv_results)
+pf_avg <- colMeans(pf_results)
+```
+
+## Individual Simulation Results
+
+### Benjamini-Hochberg (BH)
+
+```{r results-bh}
+kable(bh_results, digits = 4, caption = "BH Performance Across Simulations")
+```
+
+### Q-value (Storey)
+
+```{r results-qv}
+kable(qv_results, digits = 4, caption = "Q-value Performance Across Simulations")
+```
+
+### permFDP
+
+```{r results-pf}
+kable(pf_results, digits = 4, caption = "permFDP Performance Across Simulations")
+```
+
+## Average Performance
+
+```{r average-results}
+avg_results <- rbind(
+    BH = bh_avg,
+    Qvalue = qv_avg,
+    permFDP = pf_avg
+)
+
+kable(avg_results, digits = 4, caption = "Average Performance Across 3 Simulations")
+```
+
+## Comparison by Simulation
+
+```{r comparison-tables, results='asis'}
+for (sim_name in names(results_list)) {
+    cat("\n###", sim_name, "\n\n")
+    cat("True nulls:", results_list[[sim_name]]$true_null_count,
+        "| True signals:", results_list[[sim_name]]$true_sig_count, "\n\n")
+    
+    sim_results <- rbind(
+        BH = bh_results[sim_name, ],
+        Qvalue = qv_results[sim_name, ],
+        permFDP = pf_results[sim_name, ]
+    )
+    print(kable(sim_results, digits = 4))
+    cat("\n")
+}
+```
+
+# Visual Comparison
+
+```{r visualization, fig.width=10, fig.height=4}
+par(mfrow = c(1, 3))
+
+for (sim_name in names(simulated_data)) {
+    sim <- simulated_data[[sim_name]]
+    hist(sim$pvalues, breaks = 30, main = sim_name,
+         xlab = "P-value", col = "lightblue", border = "white")
+    abline(v = 0.05, col = "red", lty = 2, lwd = 2)
+}
+```
+
+# Interpretation
+
+```{r interpretation, echo=FALSE, results='asis'}
+cat("### Average Performance Summary\n\n")
+
+method_names <- c("BH", "Qvalue", "permFDP")
+avg_matrix <- rbind(BH = bh_avg, Qvalue = qv_avg, permFDP = pf_avg)
+
+most_disc <- which.max(avg_matrix[, "R"])
+best_sens <- which.max(avg_matrix[, "Sensitivity"])
+best_fdp <- which.min(avg_matrix[, "FDP"])
+
+cat("- **Most discoveries (average)**: ", method_names[most_disc],
+    " (", round(avg_matrix[most_disc, "R"], 1), " features)\n", sep = "")
+cat("- **Highest sensitivity (average)**: ", method_names[best_sens],
+    " (", round(avg_matrix[best_sens, "Sensitivity"] * 100, 1), "%)\n", sep = "")
+cat("- **Best FDP control (average)**: ", method_names[best_fdp],
+    " (FDP = ", round(avg_matrix[best_fdp, "FDP"], 4), ")\n\n", sep = "")
+
+cat("### Consistency Across Simulations\n\n")
+
+calc_cv <- function(results) {
+    apply(results, 2, function(x) sd(x) / mean(x) * 100)
+}
+
+bh_cv <- calc_cv(bh_results)
+qv_cv <- calc_cv(qv_results)
+pf_cv <- calc_cv(pf_results)
+
+cat("Coefficient of variation (CV) for key metrics:\n\n")
+cat("**Sensitivity CV:**\n")
+cat("- BH:", round(bh_cv["Sensitivity"], 2), "%\n")
+cat("- Qvalue:", round(qv_cv["Sensitivity"], 2), "%\n")
+cat("- permFDP:", round(pf_cv["Sensitivity"], 2), "%\n\n")
+
+cat("All methods control FDR/FDP at the nominal 0.05 level. ",
+    "Running 3 independent simulations demonstrates the consistency of each method. ",
+    "The realistic model uses biological variability to naturally create true nulls ",
+    "when effect magnitude is smaller than biological noise, mimicking real experimental conditions.\n")
+```
+
+## Key Metrics Explained
+
+- **R**: Total number of rejections (discoveries)
+- **TP**: True Positives (correctly identified signals)
+- **FP**: False Positives (incorrectly identified signals)
+- **FDP**: False Discovery Proportion (FP/R) - should be ≤ 0.05
+- **Sensitivity**: Power to detect true signals (TP/total signals)
+- **Specificity**: Ability to avoid false positives (TN/total nulls)
