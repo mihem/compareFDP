@@ -249,46 +249,6 @@ for (sim_name in names(simulated_data)) {
 }
 ```
 
-# Interpretation
-
-```{r interpretation, echo=FALSE, results='asis'}
-cat("### Average Performance Summary\n\n")
-
-method_names <- c("BH", "Qvalue", "permFDP")
-avg_matrix <- rbind(BH = bh_avg, Qvalue = qv_avg, permFDP = pf_avg)
-
-most_disc <- which.max(avg_matrix[, "R"])
-best_sens <- which.max(avg_matrix[, "Sensitivity"])
-best_fdp <- which.min(avg_matrix[, "FDP"])
-
-cat("- **Most discoveries (average)**: ", method_names[most_disc],
-    " (", round(avg_matrix[most_disc, "R"], 1), " features)\n", sep = "")
-cat("- **Highest sensitivity (average)**: ", method_names[best_sens],
-    " (", round(avg_matrix[best_sens, "Sensitivity"] * 100, 1), "%)\n", sep = "")
-cat("- **Best FDP control (average)**: ", method_names[best_fdp],
-    " (FDP = ", round(avg_matrix[best_fdp, "FDP"], 4), ")\n\n", sep = "")
-
-cat("### Consistency Across Simulations\n\n")
-
-calc_cv <- function(results) {
-    apply(results, 2, function(x) sd(x) / mean(x) * 100)
-}
-
-bh_cv <- calc_cv(bh_results)
-qv_cv <- calc_cv(qv_results)
-pf_cv <- calc_cv(pf_results)
-
-cat("Coefficient of variation (CV) for key metrics:\n\n")
-cat("**Sensitivity CV:**\n")
-cat("- BH:", round(bh_cv["Sensitivity"], 2), "%\n")
-cat("- Qvalue:", round(qv_cv["Sensitivity"], 2), "%\n")
-cat("- permFDP:", round(pf_cv["Sensitivity"], 2), "%\n\n")
-
-cat("All methods control FDR/FDP at the nominal 0.05 level. ",
-    "Running 3 independent simulations demonstrates the consistency of each method. ",
-    "The realistic model uses biological variability to naturally create true nulls ",
-    "when effect magnitude is smaller than biological noise, mimicking real experimental conditions.\n")
-```
 
 ## Key Metrics Explained
 
